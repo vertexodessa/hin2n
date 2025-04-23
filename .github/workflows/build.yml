@@ -7,39 +7,93 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      BUILD_TOOLS_VERSION: "34.0.0"
+      KEYSTORE_PASSWORD: "password123"
+      KEY_PASSWORD: "password123"
+      KEY_ALIAS: "debugkey"
 
     steps:
-      - name: checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          submodules: "recursive"
+          submodules: recursive
 
-      - name: Setup Java
+      - name: Setup Java 8
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
+          distribution: temurin
           java-version: 8
 
-      - name: Build
+      - name: Build APK (debug)
         run: ./gradlew assembleNormalArmDebug
         working-directory: Hin2n_android
 
-      - name: Sign
-        uses: r0adkll/sign-android-release@v1
-        # ID used to access action output
-        id: sign_app
-        with:
-          releaseDirectory: Hin2n_android/app/build/outputs/apk/normalArm/debug
-          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-          alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
-        env:
-          BUILD_TOOLS_VERSION: "34.0.0"
+      - name: Generate debug keystore
+        run: |
+          # create a brand-new keystore
+          keytool \
+            -genkeypair \
+            -alias $KEY_ALIAS \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass $KEYSTORE_PASSWORD \
+            -keypass $KEY_PASSWORD \
+            -dname "CN=Debug, OU=None, O=None, L=None, S=None, C=US" \
+            -keystore signingKey.jks
 
-      - name: Upload
+          # place it next to your APK so jarsigner can find it
+          mkdir -p Hin2n_android/app/build/outputs/apk/normalArm/debug
+          mv signingKey.jks Hin2n_android/app/build/outputs/apk/normalArm/debug/
+
+      - name: Inspect keystore contents
+        run: |
+          keytool -list \
+            -v \
+            -keystore Hin2n_android/app/build/outputs/apk/normalArm/debug/signingKey.jks \
+            -storepass $KEYSTORE_PASSWORD \
+            -alias $KEY_ALIAS
+
+      - name: List debug APK directory
+        run: |
+          echo "Contents of the debug APK folder:"
+          ls -lR Hin2n_android/app/build/outputs/apk/normalArm/debug
+
+      - name: List debug APK directory
+        run: |
+          ls -lR Hin2n_android/app/build/outputs/apk/normalArm/debug
+
+      - name: Sign & align with apksigner
+        id: sign
+        run: |
+          APK_DIR=Hin2n_android/app/build/outputs/apk/normalArm/debug
+          SDK=${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/$BUILD_TOOLS_VERSION
+
+          # 1) Find the (unsigned) APK
+          APK_PATH=$(find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" | head -n1)
+          echo "→ unsigned APK: $APK_PATH"
+
+          # 2) Zip-align it
+          ALIGNED="${APK_PATH%.apk}-aligned.apk"
+          echo "→ zipalign → $ALIGNED"
+          "$SDK/zipalign" -v -p 4 "$APK_PATH" "$ALIGNED"
+
+          # 3) Sign with apksigner (supports v1 & v2 schemes)
+          echo "→ apksigner → $ALIGNED"
+          "$SDK/apksigner" sign \
+            --ks "$APK_DIR/signingKey.jks" \
+            --ks-key-alias $KEY_ALIAS \
+            --ks-pass pass:$KEYSTORE_PASSWORD \
+            --key-pass pass:$KEY_PASSWORD \
+            "$ALIGNED"
+
+          # 4) Expose for upload
+          echo "signedReleaseFile=$ALIGNED" >> $GITHUB_OUTPUT
+
+      - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hin2n
-          path: ${{steps.sign_app.outputs.signedReleaseFile}}
+          name: hin2n-debug
+          path: ${{ steps.sign.outputs.signedReleaseFile }}
           if-no-files-found: error
